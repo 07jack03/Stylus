@@ -1,12 +1,12 @@
 ;========================
-; imu_lsm9ds1.s  (SPI slow debug with phase markers)
+; imu_lsm9ds1.s  (SSP2 SPI WHO_AM_I test)
 ;========================
 #include <xc.inc>
 
 global  IMU_Test_Init
 global  IMU_Test_Step
 
-; CSAG -> RA4
+; CSAG -> RA4 (keep if working)
 CSAG_PORT   equ LATA
 CSAG_TRIS   equ TRISA
 CSAG_BIT    equ 4
@@ -19,107 +19,99 @@ rx: ds 1
 
 psect code, class=CODE
 
-;---------------------------------------
-; visible delay (tweak if needed)
-;---------------------------------------
 Delay:
-        movlw   0x20        ; outer loop (tune this)
+        movlw   0x20
         movwf   d0, A
-
 D0:     movlw   0xFF
         movwf   d1, A
-
 D1:     movlw   0xFF
         movwf   d2, A
-
 D2:     decfsz  d2, F, A
         bra     D2
-
         decfsz  d1, F, A
         bra     D1
-
         decfsz  d0, F, A
         bra     D0
-
         return
 
 ;---------------------------------------
-; SPI1 transfer: write W, return W read
+; SSP2 SPI transfer:
+; write W to SSP2BUF, wait SSP2IF, return W=SSP2BUF
 ;---------------------------------------
-SPI1_Xfer:
-        movwf   SSP1BUF, A
-WB:     btfss   SSP1STAT, 0, A     ; BF
-        bra     WB
-        movf    SSP1BUF, W, A
+SPI2_Xfer:
+        movwf   SSP2BUF, A
+W2:     btfss   PIR2, 5, A        ; SSP2IF
+        bra     W2
+        bcf     PIR2, 5, A        ; clear flag
+        movf    SSP2BUF, W, A
         return
 
 IMU_Test_Init:
-        ; PORTJ LEDs output
+        ; LEDs
         clrf    TRISJ, A
         clrf    LATJ,  A
 
-        ; CSAG output, idle high
+        ; CSAG output, idle HIGH
         bcf     CSAG_TRIS, CSAG_BIT, A
         bsf     CSAG_PORT, CSAG_BIT, A
 
-        ; MSSP1 pins
-        bsf     TRISC, 4, A        ; RC4 SDI1 (MISO) input
-        bcf     TRISC, 3, A        ; RC3 SCK1 output
-        bcf     TRISC, 5, A        ; RC5 SDO1 (MOSI) output
+        ; ========= SPI2 pin directions =========
+        ; TODO: set the *actual* SSP2 pins:
+        ; - SCK2 output
+        ; - SDO2 output (MOSI)
+        ; - SDI2 input  (MISO)
+        ;
+        ; Example placeholders (CHANGE THESE!):
+        ; bcf TRISD, ?, A   ; SCK2 output
+        ; bcf TRISD, ?, A   ; SDO2 output
+        ; bsf TRISD, ?, A   ; SDI2 input
 
-        ; SPI mode try: CKP=1 idle high, CKE=1
-        movlw   01000000B
-        movwf   SSP1STAT, A
+        ; ========= SPI2 config =========
+        ; CKE=0 in SSP2STAT (like your old working code)
+        bcf     CKE2, A
 
-        movlw   00110010B          ; SSPEN=1, CKP=1, Master Fosc/64
-        movwf   SSP1CON1, A
+        ; SSP2CON1: enable + master + clock polarity
+        ; This matches your known-good:
+        movlw   (SSP2CON1_SSPEN_MASK) | (SSP2CON1_CKP_MASK) | (SSP2CON1_SSPM1_MASK)
+        movwf   SSP2CON1, A
 
-        movf    SSP1BUF, W, A
+        ; Clear any pending flag by reading buffer
+        movf    SSP2BUF, W, A
+        bcf     PIR2, 5, A
         return
 
-;---------------------------------------
-; Step:
-; A) Turn on ONLY LED0 while CS is LOW
-; B) Turn on ONLY LED1, then sample raw MISO and reflect it on LED2
-; C) Do SPI readback and display byte on PORTJ
-;---------------------------------------
 IMU_Test_Step:
-
-; ---- A: CS LOW marker on LED0 ----
+        ; Phase marker A
         clrf    LATJ, A
-        bcf     CSAG_PORT, CSAG_BIT, A      ; CS low
-        bsf     LATJ, 0, A                  ; phase marker (may invert on your board)
-        call    Delay
-
-; ---- B: raw MISO check ----
-        clrf    LATJ, A
-        bsf     LATJ, 1, A                  ; phase marker
-
-        ; sample raw RC4 (MISO) -> show on LED2
-        btfsc   PORTC, 4, A
-        bsf     LATJ, 2, A
-        btfss   PORTC, 4, A
-        bcf     LATJ, 2, A
-        call    Delay
-
-; ---- C: SPI byte readback ----
-        clrf    LATJ, A
-        bsf     LATJ, 3, A                  ; phase marker
-
-        ; keep CS low for the transfer
         bcf     CSAG_PORT, CSAG_BIT, A
+        bsf     LATJ, 0, A
+        call    Delay
+
+        ; Phase marker B
+        clrf    LATJ, A
+        bsf     LATJ, 1, A
+        call    Delay
+
+        ; Phase C: WHO_AM_I read
+        clrf    LATJ, A
+        bsf     LATJ, 3, A
+
+        bcf     CSAG_PORT, CSAG_BIT, A
+        nop
+        nop
+
+        movlw   0x8F              ; READ WHO_AM_I (0x0F)
+        call    SPI2_Xfer         ; discard
 
         movlw   0x00
-        call    SPI1_Xfer
+        call    SPI2_Xfer         ; read byte
         movwf   rx, A
 
-        bsf     CSAG_PORT, CSAG_BIT, A      ; CS high
+        bsf     CSAG_PORT, CSAG_BIT, A
 
-        ; show rx on LEDs
         movf    rx, W, A
         movwf   LATJ, A
         call    Delay
-
         return
 
 end
