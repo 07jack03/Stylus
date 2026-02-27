@@ -1,74 +1,127 @@
 #include <xc.inc>
 
+; -------- LSM9DS1 A/G registers --------
+WHO_AM_I_AG   equ 0x0F
+CTRL_REG1_G   equ 0x10
+OUT_X_L_G     equ 0x18
+
+; -------- RAM (access) --------
+psect udata_acs
+addr    ds 1
+tmp     ds 1
+
+psect code
+global main
+
 ; ==========================================================
-; SPI2 on PORTD:
-;   RD4 = SDO2 (output from PIC)
-;   RD5 = SDI2 (input to PIC)
-;   RD6 = SCK2 (clock output in master mode)
-;   RD7 = SS2* (we will drive as GPIO chip-select)
+; SPI1 Setup: Mode 3 for LSM9DS1 (CKP=1, CKE=0)
+; Pins (as you want):
+;   RD3 = SCK1  -> SPC/SCLK on breakout
+;   RD4 = SDO1  -> SDI on breakout (MOSI)
+;   RD5 = SDI1  <- SDOAG on breakout (MISO)
+;   RA4 = CSAG  -> CS_A/G (active low)
+; LEDs: LATJ
 ; ==========================================================
+SPI1_Setup:
+    ; Directions
+    bcf     TRISD, 3, A      ; RD3 SCK1 output
+    bcf     TRISD, 4, A      ; RD4 SDO1 (MOSI) output
+    bsf     TRISD, 5, A      ; RD5 SDI1 (MISO) input
+    bcf     TRISA, 4, A      ; RA4 CSAG output
 
-global  SPI2_Setup, SPI2_TransferByte
+    ; Idle levels
+    bsf     LATA, 4, A       ; CS high (inactive)
+    bsf     LATD, 3, A       ; SCK idle high (CKP=1)
 
-psect   code
+    ; SPI mode bits
+    bcf     SSP1STAT, CKE, A ; CKE=0 for Mode 3 with CKP=1
 
-; --------------------------
-; SPI2_Setup
-; --------------------------
-SPI2_Setup:
-    ; 1) Make sure PORTD pins are digital (on this chip PORTD is typically digital-only,
-    ; but leaving this comment here as a "checklist" item: analog pins must be disabled.)
-
-    ; 2) TRIS directions:
-    ;    RD4 (SDO2) output, RD6 (SCK2) output, RD7 (CS) output
-    ;    RD5 (SDI2) input
-    bcf     TRISD, 4, A      ; RD4 output (SDO2)
-    bsf     TRISD, 5, A      ; RD5 input  (SDI2)
-    bcf     TRISD, 6, A      ; RD6 output (SCK2)
-    bcf     TRISD, 7, A      ; RD7 output (manual CS)
-
-    ; 3) Set safe idle levels using LAT (not PORT) so outputs are stable
-    bsf     LATD, 7, A       ; CS high (inactive)
-    bcf     LATD, 6, A       ; SCK idle low (CKP=0 mode)
-
-    ; 4) Configure SPI2 as Master
-    ; SPI mode bits live in SSP2STAT and SSP2CON1 (MSSP2 module)
-    ;
-    ; SSP2STAT:
-    ;   CKE = 1 means data changes on active-to-idle edge, sampled on idle-to-active edge (depends on CKP)
-    ; We'll start with a common "Mode 0" style: CKP=0, CKE=1.
-    ;
-    ; SSP2CON1:
-    ;   SSPEN = 1 enables SPI pins / module
-    ;   CKP   = 0 clock idle low
-    ;   SSPM  = 0000 -> SPI Master, clock = Fosc/4 (fastest, good for first tests if wiring is short)
-    ;
-    bsf     SSP2STAT, CKE, A     ; transmit on active edge setting (common start point)
-
-    movlw   b'00100000'          ; SSPEN=1 (bit5), CKP=0, SSPM=0000 (Fosc/4)
-    movwf   SSP2CON1, A
+    ; Enable SPI Master, CKP=1, choose slower clock first (Fosc/64)
+    ; SSPM=0010 typically => Fosc/64
+    movlw   b'00110010'      ; SSPEN=1(bit5), CKP=1(bit4), SSPM=0010
+    movwf   SSP1CON1, A
 
     return
 
-; --------------------------
-; SPI2_TransferByte
+; ==========================================================
+; SPI1 transfer 1 byte
 ; IN:  WREG = byte to send
-; OUT: WREG = byte received during transfer
-; --------------------------
-SPI2_TransferByte:
-    ; Pull CS low to start transaction (your device may need this)
-    bcf     LATD, 7, A
-
-    ; Writing SSP2BUF starts the 8 clock pulses in hardware
-    movwf   SSP2BUF, A
-
-wait_bf:
-    btfss   SSP2STAT, BF, A      ; BF=1 when receive is complete (8 bits shifted)
-    bra     wait_bf
-
-    ; Read received byte (also clears BF condition by reading buffer)
-    movf    SSP2BUF, W, A
-
-    ; End transaction
-    bsf     LATD, 7, A
+; OUT: WREG = byte received
+; ==========================================================
+SPI1_Xfer:
+    movwf   SSP1BUF, A
+waitBF:
+    btfss   SSP1STAT, BF, A
+    bra     waitBF
+    movf    SSP1BUF, W, A
     return
+
+; ==========================================================
+; LSM9DS1 A/G READ 1 register
+; Command format (A/G): first byte = (addr<<1) | 1
+; ==========================================================
+LSM_AG_ReadReg:
+    bcf     LATA, 4, A           ; CS low
+
+    movf    addr, W, A
+    rlf     WREG, W, A           ; addr << 1
+    iorlw   0x01                 ; RW=1
+    call    SPI1_Xfer            ; send command (ignore returned)
+
+    movlw   0x00
+    call    SPI1_Xfer            ; clock in data
+    ; WREG now has data byte
+
+    bsf     LATA, 4, A           ; CS high
+    return
+
+; ==========================================================
+; LSM9DS1 A/G WRITE 1 register
+; First byte = (addr<<1) | 0, then data byte
+; IN: addr preset, WREG=data
+; ==========================================================
+LSM_AG_WriteReg:
+    movwf   tmp, A
+
+    bcf     LATA, 4, A           ; CS low
+
+    movf    addr, W, A
+    rlf     WREG, W, A           ; addr<<1 (RW=0)
+    call    SPI1_Xfer
+
+    movf    tmp, W, A
+    call    SPI1_Xfer
+
+    bsf     LATA, 4, A           ; CS high
+    return
+
+; ==========================================================
+; main
+; ==========================================================
+main:
+    ; LEDs on Port J
+    clrf    TRISJ, A
+    clrf    LATJ, A
+
+    call    SPI1_Setup
+
+    ; ---- WHO_AM_I proof ----
+    movlw   WHO_AM_I_AG
+    movwf   addr, A
+    call    LSM_AG_ReadReg
+    movwf   LATJ, A              ; should display 0x68
+
+    ; ---- turn gyro on ----
+    movlw   CTRL_REG1_G
+    movwf   addr, A
+    movlw   0x60                 ; ODR=119Hz, FS=245dps
+    call    LSM_AG_WriteReg
+
+loop:
+    ; Read OUT_X_H_G and show on LEDs
+    movlw   (OUT_X_L_G + 1)      ; 0x19 = X high byte
+    movwf   addr, A
+    call    LSM_AG_ReadReg
+    movwf   LATJ, A
+
+    bra     loop
