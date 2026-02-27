@@ -1,5 +1,5 @@
 ;========================
-; main.s  (SPI power/wiring test - slow visible phases)
+; main.s  (calls the SSP2-based IMU test)
 ;========================
 #include <xc.inc>
 
@@ -8,14 +8,15 @@ extrn   IMU_Test_Step
 
 psect   resetVec, abs
 org     0x0000
-        goto start
+        goto    start
 
 psect   code, class=CODE
 start:
-        ; LEDs on PORTJ
+        ; PORTJ LEDs output (EasyPIC LEDs)
         clrf    TRISJ, A
         clrf    LATJ,  A
 
+        ; init SPI + CS + LEDs
         call    IMU_Test_Init
 
 loop:
